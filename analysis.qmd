@@ -1,0 +1,840 @@
+---
+title: "Time Series Analysis of Daily Wheat and Corn Futures Prices"
+author: "Anthony Le" 
+date: "Dec 5, 2024" 
+editor: visual 
+format:         
+  html:
+    code-summary: "Show the code" 
+    warning : false 
+    eval: true
+    self-contained: true 
+    toc: true 
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+
+library(astsa) 
+library(tstools)
+library(xts)
+library(mosaic)
+library(dplyr)
+library(car)
+library(Stat2Data)
+library(dynlm)
+library(nlme)
+library(AER)
+library(forecast)
+library(mgcv)
+library(tseries)
+library(lmtest)
+library(fBasics)
+library(leaps)
+
+library(urca)
+library(tidyverse)
+library(ggthemes)
+library(ggplot2)
+library(gt)
+library(kableExtra)
+library(modelsummary)
+library(performance)
+library(utils)
+library(scales)
+library(gridExtra)
+library(DHARMa)
+library(nortest)
+library(moments)
+library(see)
+library(patchwork)
+library(gganimate)
+library(gapminder)
+library(gifski)
+library(zoo)
+library(fGarch) 
+library(arfima)
+library(tsDyn) 
+library(lme4)
+library(tsbox)
+
+
+library(RColorBrewer)
+library(TTR)
+library(quantmod)
+library(PerformanceAnalytics)
+library(Quandl)
+library(fGarch)
+library(parallel)
+library(rugarch)
+
+
+
+
+```
+
+# I. Introduction
+
+# II. Methods
+
+## 1. Working Data
+
+### a. Data Acquisition & Wrangling
+
+```{r}
+
+# Data Imports & Wrangling 
+wheat <- read.csv("data/wheat_futures.csv")
+corn <- read.csv("data/corn_futures.csv")
+
+wheatvol <- read.csv("data/wheat_volume.csv")
+
+# Fill in N/A's for wheat volume
+merged_data <- merge(wheat, wheatvol, by = "Date", all.x = TRUE)
+merged_data$Vol.[is.na(merged_data$Vol.)] <- merged_data$Volume[is.na(merged_data$Vol.)]
+wheat <- merged_data[, !names(merged_data) %in% "Volume"]
+
+wheat <- wheat %>%
+  mutate(Date = as.Date(wheat$Date)) 
+
+corn <- corn %>%
+  mutate(Date = as.Date(corn$Date))
+
+total <- merge(wheat,corn,by="Date")%>% 
+  rename('Wheat' = 'Price.x',
+         'wheat_vol' = 'Vol..x',
+         'Corn' = 'Price.y',
+         'corn_vol' = 'Vol..y') %>%
+  mutate(wheat_vol = na.approx(wheat_vol))%>%
+  mutate(corn_vol = na.approx(corn_vol))%>%
+  mutate("Month" = month(Date)) %>%
+  mutate("Year" = year(Date))
+
+```
+
+### b. Potential Biases & Assumptions
+
+## 2. Time Series Analysis
+
+### a. Assumption & Validation
+
+### b. Function of Time Models
+
+### c. ARIMA, ARFIMA, SARIMA, and ARIMAX Models
+
+### d. Spectral Analysis
+
+### e. GARCH Models
+
+### f. Markov Switching AR/Threshold Models
+
+### h. Bootstraping
+
+### i. Cross Validation
+
+### j. Self-defining Functions
+
+```{r, include=FALSE}
+# Self-Defining Functions
+
+    # Stationarity Tests
+    check_stationarity <- function(data) {
+      adf_result <- adf.test(data)
+      pp_result <- pp.test(data)
+      kpss_result <- kpss.test(data)
+      urers_result <- ur.ers(data, type = "DF-GLS", model = "constant")
+      results <- data.frame(
+        Test = c("ADF Test", "Phillips-Perron Test", "KPSS Test", "ERS Test"),
+        `Test Statistic` = c(round(adf_result[["statistic"]][["Dickey-Fuller"]], 3),
+                             round(pp_result[["statistic"]][["Dickey-Fuller Z(alpha)"]], 3),
+                             round(kpss_result[["statistic"]][["KPSS Level"]], 3),
+                             round(urers_result@teststat, 3)),
+        `P-Value` = c(round(adf_result[["p.value"]],2),
+                      round(pp_result[["p.value"]],2),
+                      round(kpss_result[["p.value"]],2),
+                      "N/A"),
+        Interpretation = c(
+          ifelse(adf_result[["p.value"]] < 0.05, "Stationary", "Non-Stationary"),
+          ifelse(pp_result[["p.value"]] < 0.05, "Stationary", "Non-Stationary"),
+          ifelse(kpss_result[["p.value"]] < 0.05, "Non-Stationary", "Stationary"),
+          ifelse(urers_result@teststat < urers_result@cval[2], "Stationary", "Non-Stationary")))
+      kable(results, align = 'c') %>%
+        kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condensed")) %>%
+        add_header_above(c("Stationarity Test Summary" = 4))
+    }
+
+  # Time Series Plotting
+    tsgplot <- function(data, X, Y, xlab, ylab, timebreak, name) {
+    ggplot(data, aes(x = X, y = Y)) +
+      geom_line(color = "darkblue", size = 1) +
+      ggtitle(name) +
+      xlab(xlab) +
+      ylab(ylab) +
+      scale_x_date(date_labels = "%b %Y", date_breaks = timebreak)+
+      theme_light()+
+      scale_y_continuous(labels = scales::label_number(scale_cut = cut_short_scale()))
+    }
+
+
+
+
+    # ACF/PACF/First-Last Third Plotting
+    four_plots <- function(data) {
+      n <- length(data)
+      first_third <- data[1:floor(n / 3)]
+      last_third <- data[floor(2 * n / 3):n]
+      par(mfrow = c(2, 2))
+      acf(data, main = "ACF of Whole Data", lag.max =30)
+      pacf(data, main = "PACF of Whole Data", lag.max =30)
+      acf(first_third, main = "ACF of First Third")
+      acf(last_third, main = "ACF of Last Third")
+      par(mfrow = c(1, 1))
+    }
+
+
+    # ACF/PACF Plotting
+    two_plots <- function(data, lag =50) {
+      par(mfrow = c(2, 1))
+      acf(data, lag.max =lag)
+      pacf(data, lag.max =lag)
+      par(mfrow = c(1, 1))
+    }
+
+    # Differencing Plotting
+    diff_plots <- function(data, name = "Time Series Plot", lag = 30) {
+      layout(matrix(c(1,1,2,3), 2, 2, byrow = TRUE))
+      astsa::tsplot(data, main= name)
+      abline(h = mean(data, na.rm = TRUE), col = "red", lty = 2)
+      acf(data, lag.max =lag)
+      pacf(data, lag.max =lag)
+      par(mfrow = c(1,1))
+    }
+
+    xts_plots <- function(data, name = "Time Series Plot", lag = 30) {
+      layout(matrix(c(1,1,2,3), 2, 2, byrow = TRUE))
+      astsa::tsplot(ts_ts(data), main= name)
+      abline(h = mean(ts_ts(data), na.rm = TRUE), col = "red", lty = 2)
+      acf(data, lag.max =lag)
+      pacf(data, lag.max =lag)
+      par(mfrow = c(1,1))
+    }
+
+
+
+    # Model Summary
+    model_summary_table <- function(models_list) {
+      model_names <- names(models_list)
+      if (is.null(model_names)) {
+        model_names <- paste("Model", seq_along(models_list)) }
+      summary_df <- data.frame(Model = character(),
+                               `Adjusted  $R^2$ ` = numeric(),
+                               AIC = numeric(),
+                               BIC = numeric(),
+                               stringsAsFactors = FALSE)
+      for (i in seq_along(models_list)) {
+        model <- models_list[[i]]
+        model_summary <- summary(model)
+        summary_df[i, ] <- c(
+          model_names[i],
+          round(model_summary[["adj.r.squared"]], 2),
+          round(AIC(model), 2),
+          round(BIC(model), 2)) }
+      kable(summary_df, align = 'c', col.names = c("Model", "Adjusted R²", "AIC", "BIC")) %>%
+        kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condensed")) %>%
+        add_header_above(c("Model Summary" = 4))
+    }
+
+
+    # GARCH Model Summary
+    garch_table <- function(models_list) {
+      model_names <- names(models_list)
+      if (is.null(model_names)) {
+        model_names <- paste("Model", seq_along(models_list)) }
+      summary_df <- data.frame(Model = character(),
+                               AIC = numeric(),
+                               BIC = numeric(),
+                               stringsAsFactors = FALSE)
+      for (i in seq_along(models_list)) {
+        model <- models_list[[i]]
+        summary_df[i, ] <- c(
+          model_names[i],
+          round(model@fit[["ics"]][["AIC"]], 3),
+          round(model@fit[["ics"]][["BIC"]], 3)) }
+      kable(summary_df, align = 'c', col.names = c("Model",  "AIC", "BIC")) %>%
+        kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condensed")) %>%
+        add_header_above(c("GARCH Summary" = 3))
+    }
+
+
+    # SARIMA Model Summary
+    sarima_summary_table <- function(models_list) {
+      model_names <- names(models_list)
+      if (is.null(model_names)) {
+        model_names <- paste("Model", seq_along(models_list)) }
+      summary_df <- data.frame(Model = character(),
+                               AIC = numeric(),
+                               BIC = numeric(),
+                               stringsAsFactors = FALSE)
+      for (i in seq_along(models_list)) {
+        model <- models_list[[i]]
+        model_summary <- summary(model)
+        summary_df[i, ] <- c(
+          model_names[i],
+          round(AIC(model), 2),
+          round(BIC(model), 2)) }
+      kable(summary_df, align = 'c', col.names = c("Model",  "AIC", "BIC")) %>%
+        kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condensed")) %>%
+        add_header_above(c("Model Summary" = 3))
+    }
+
+
+
+    # Normality Tests Function
+    check_normality_residuals <- function(model) {
+      residuals <- residuals(model) 
+      ad_result <- ad.test(residuals)
+      jb_result <- jarque.bera.test(residuals)
+      lillie_result <- lillie.test(residuals)
+      skew <- skewness(residuals)
+      kurt <- kurtosis(residuals)
+      # Summary table
+      results <- data.frame(
+        Test = c("Anderson-Darling Test", "Jarque-Bera Test", "Lilliefors Test", "Skewness", "Kurtosis"),
+        `Test Statistic` = c(round(ad_result$statistic, 3),
+                             round(jb_result$statistic, 3),
+                             round(lillie_result$statistic, 3),
+                             round(skew, 2),
+                             round(kurt, 2)),
+        `P-Value` = c(round(ad_result$p.value, 3),
+                      round(jb_result$p.value, 3),
+                      round(lillie_result$p.value, 3),
+                      "N/A", "N/A"),
+        Interpretation = c(
+          ifelse(ad_result$p.value > 0.05, "Normal", "Non-Normal"),
+          ifelse(jb_result$p.value > 0.05, "Normal", "Non-Normal"),
+          ifelse(lillie_result$p.value > 0.05, "Normal", "Non-Normal"),
+          ifelse(abs(skew) < 0.5, "Approximately Symmetric", ifelse(skew > 0, "Right-Skewed", "Left-Skewed")),
+          ifelse(abs(kurt - 3) < 0.5, "Mesokurtic", ifelse(kurt > 3, "Leptokurtic (Heavy Tails)", "Platykurtic (Light Tails)"))
+        )
+      )
+      kable(results, align = 'c') %>%
+        kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condensed")) %>%
+        add_header_above(c("Normality Test Summary" = 4))
+    }
+
+  # Time Series Summary Table
+ts_summary_table <- function(ts_list) {
+  
+  ts_names <- names(ts_list)
+  if (is.null(ts_names)) {
+    ts_names <- paste("Series", seq_along(ts_list))  }
+  
+  summary_df <- data.frame(Series = character(),
+                           Start = character(),
+                           End = character(),
+                           Min = numeric(),
+                           Max = numeric(),
+                           Mean = numeric(),
+                           Median = numeric(),
+                           stringsAsFactors = FALSE)
+
+  for (i in seq_along(ts_list)) {
+    ts_data <- ts_list[[i]]
+    summary_df[i, ] <- c(
+      ts_names[i],
+      start(ts_data) %>% paste(collapse = "-"),
+      end(ts_data) %>% paste(collapse = "-"),
+      round(min(ts_data, na.rm = TRUE), 2),
+      round(max(ts_data, na.rm = TRUE), 2),
+      round(mean(ts_data, na.rm = TRUE), 2),
+      round(median(ts_data, na.rm = TRUE), 2)
+    )
+  }
+
+  kable(summary_df, align = 'c', 
+        col.names = c("Series", "Start", "End", "Min", "Max", "Mean", "Median")) %>%
+    kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condensed")) %>%
+    add_header_above(c("Time Series Summary" = 7))
+}
+
+
+calculate_r2 <- function(predicted_values, actual_values) {
+  ss_residual <- sum((actual_values - predicted_values)^2)
+  ss_total <- sum((actual_values - mean(actual_values))^2)
+  r_squared <- 1 - (ss_residual / ss_total)
+  
+  cat("R-squared of the model is:", round(r_squared, 4), "\n")}
+
+ts_plots <- function(data, title = "Time Series Plots") {
+  par(mfrow = c(4, 2))
+  for (series_name in colnames(data)) {
+    tsplot(data[, series_name], main = series_name, ylab = "Values", xlab = "Time")
+  }
+  title(main = title, outer = TRUE)
+}
+
+
+stationarity_summary <- function(data) {
+  summary_table <- data.frame(
+    Series = character(),
+    `ADF Test` = character(),
+    `Phillips-Perron Test` = character(),
+    `KPSS Test` = character(),
+    `ERS Test` = character(),
+    stringsAsFactors = FALSE
+  )
+
+  for (series_name in colnames(data)) {
+    series <- data[,series_name]
+
+    adf_test <- adf.test(series, alternative = "stationary")
+    pp_test <- pp.test(series)
+    kpss_test <- kpss.test(series, null = "Level")
+    urers_test <- ur.ers(series, type = "DF-GLS", model = "constant")
+
+    adf_result <- ifelse(adf_test$p.value < 0.05, "Stationary", "Non-Stationary")
+    pp_result <- ifelse(pp_test$p.value < 0.05, "Stationary", "Non-Stationary")
+    kpss_result <- ifelse(kpss_test$p.value < 0.05, "Non-Stationary", "Stationary")
+    urers_result <- ifelse(urers_test@teststat < urers_test@cval[2], "Stationary", "Non-Stationary")
+
+    summary_table <- rbind(
+      summary_table,
+      data.frame(
+        Series = series_name,
+        `ADF Test` = adf_result,
+        `Phillips-Perron Test` = pp_result,
+        `KPSS Test` = kpss_result,
+        `ERS Test` = urers_result,
+        stringsAsFactors = FALSE
+      )
+    )
+  }
+
+  summary_table %>%
+    kbl(align = 'c', col.names = c("Series", "ADF Test", "Phillips-Perron Test", "KPSS Test", "ERS Test")) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed")) %>%
+    add_header_above(c("Stationarity Test Interpretations" = 5))
+}
+
+garchAutoTryFit = function(
+   ll,
+   data,
+   trace=FALSE,
+   forecast.length=1,
+   with.forecast=TRUE,
+   ic="AIC",
+   garch.model="garch" )
+{
+   formula = as.formula( paste( sep="",
+                                "~ arma(", ll$order[1], ",", ll$order[2], ")+",
+                                garch.model,
+                                "(", ll$order[3], ",", ll$order[4], ")" ) )
+   fit = tryCatch( garchFit( formula=formula,
+                             data=data,
+                             trace=FALSE,
+                             cond.dist=ll$dist ),
+                   error=function( err ) TRUE,
+                   warning=function( warn ) FALSE )
+
+   pp = NULL
+
+   if( !is.logical( fit ) ) {
+      if( with.forecast ) {
+         pp = tryCatch( predict( fit,
+                                 n.ahead=forecast.length,
+                                 doplot=FALSE ),
+                        error=function( err ) FALSE,
+                        warning=function( warn ) FALSE )
+         if( is.logical( pp ) ) {
+            fit = NULL
+         }
+      }
+   } else {
+      fit = NULL
+   }
+
+   if( trace ) {
+      if( is.null( fit ) ) {
+         cat( paste( sep="",
+                     "   Analyzing (", ll$order[1], ",", ll$order[2],
+                                    ",", ll$order[3], ",", ll$order[4], ") with ",
+                                    ll$dist, " distribution done.",
+                     "Bad model.\n" ) )
+      } else {
+         if( with.forecast ) {
+            cat( paste( sep="",
+                        "   Analyzing (", ll$order[1], ",", ll$order[2], ",",
+                                          ll$order[3], ",", ll$order[4], ") with ",
+                                          ll$dist, " distribution done.",
+                        "Good model. ", ic, " = ", round(fit@fit$ics[[ic]],6),
+                        ", forecast: ",
+                        paste( collapse=",", round(pp[,1],4) ), "\n" ) )
+         } else {
+            cat( paste( sep="",
+                        "   Analyzing (", ll[1], ",", ll[2], ",", ll[3], ",", ll[4], ") with ",
+                                          ll$dist, " distribution done.",
+                        "Good model. ", ic, " = ", round(fit@fit$ics[[ic]],6), "\n" ) )
+         }
+      }
+   }
+
+   return( fit )
+}
+
+garchAuto = function(
+   xx,
+   min.order=c(0,0,1,1),
+   max.order=c(5,5,1,1),
+   trace=FALSE,
+   cond.dists="sged",
+   with.forecast=TRUE,
+   forecast.length=1,
+   arma.sum=c(0,1e9),
+   cores=1,
+   ic="AIC",
+   garch.model="garch" )
+{
+   require( fGarch )
+   require( parallel )
+
+   len = NROW( xx )
+
+   models = list( )
+
+   for( dist in cond.dists )
+   for( p in min.order[1]:max.order[1] )
+   for( q in min.order[2]:max.order[2] )
+   for( r in min.order[3]:max.order[3] )
+   for( s in min.order[4]:max.order[4] )
+   {
+      pq.sum = p + q
+      if( pq.sum <= arma.sum[2] && pq.sum >= arma.sum[1] )
+      {
+         models[[length( models ) + 1]] = list( order=c( p, q, r, s ), dist=dist )
+      }
+   }
+
+   res = mclapply( models,
+                   garchAutoTryFit,
+                   data=xx,
+                   trace=trace,
+                   ic=ic,
+                   garch.model=garch.model,
+                   forecast.length=forecast.length,
+                   with.forecast=TRUE,
+                   mc.cores=cores )
+
+   best.fit = NULL
+
+   best.ic = 1e9
+   for( rr in res )
+   {
+      if( !is.null( rr ) )
+      {
+         current.ic = rr@fit$ics[[ic]]
+         if( current.ic < best.ic )
+         {
+            best.ic = current.ic
+            best.fit = rr
+         }
+      }
+   }
+
+   if( best.ic < 1e9 )
+   {
+      return( best.fit )
+   }
+
+   return( NULL )
+}
+```
+
+# III. Results & Conclusions
+
+## 1. Descriptive Analysis
+
+```{r}
+
+culer = c(rgb(.85,.30,.12,.6), rgb(.12,.65,.85,.6))
+# Plot the time series 
+price_plot <- ggplot(total, aes(x = Date)) +
+  geom_line(aes(y = Wheat, color = "Wheat")) +
+  geom_line(aes(y = Corn, color = "Corn")) +
+  labs(title = "Time Series of Wheat and Corn Futures Prices",
+       y = "Price ($)",
+       x = "Year") +
+  scale_color_manual(values = c("Wheat" = "coral", "Corn"= "cornflowerblue")) +
+  theme_light()
+
+volume_plot <- ggplot(total, aes(x = Date)) +
+  geom_line(aes(y = wheat_vol, color = "Wheat Volume"), linewidth = .5) +
+  geom_line(aes(y = corn_vol, color = "Corn Volume"), linewidth = .25) +
+  labs(title = "Time Series of Wheat and Corn Futures Volumes",
+       y = "Volume",
+       x = "Year") +
+  scale_color_manual(values = c("Wheat Volume" = "coral", "Corn Volume"= "cornflowerblue"))+
+  scale_y_continuous(labels = scales::label_number(scale_cut = cut_short_scale())) +
+  theme_light()
+
+price_plot / volume_plot
+```
+
+```{r}
+
+
+p <- ggplot(total, aes(x=Month, color = Year)) + 
+  geom_line(aes(y = Wheat), linetype = 3, alpha = 0.7, label =" ") +
+  geom_line(aes(y = Corn), linetype = 4, alpha = 0.7) +
+  labs(x = "Month",
+       y = "Price ($)",
+       title = "Wheat and Corn Futures Prices by Month") +
+  theme_minimal() + 
+  scale_x_continuous(breaks=c(2,4, 6, 8,10,12)) +
+  transition_states(Year) 
+
+animate(p, renderer = gifski_renderer())
+```
+
+## 2. Exploration
+
+```{r}
+
+# "time series has no or less than 2 periods"
+
+# plot(decompose(wheat.ts))
+# plot(stl(wheat.ts))
+
+
+```
+
+```{r}
+# Separating Training & Testing data
+testdata <- tail(total, 30)
+total <- head(total,6293)
+
+
+# Constructing xts objects
+total.ts <- xts(total, order.by = total$Date)
+wheat.ts <- xts(total$Wheat, total$Date)
+corn.ts <- xts(total$Corn, total$Date)
+
+
+# Original Data 
+xts_plots(wheat.ts,"Wheat Futures",20)
+xts_plots(corn.ts,"Corn Futures",20)
+
+# Differenced Plots
+xts_plots(diff(wheat.ts)[-1],"Differenced Wheat Futures",20)
+xts_plots(diff(corn.ts)[-1],"Differenced Corn Futures")
+
+
+# Daily returns 
+# One way to calculate the returns is to use diff(log(data)), which is commented below. 
+# xts_plots(diff(log(wheat.ts))[-1],"Returns on Wheat Futures",25)
+
+# However, for the context of financial data, we can also use dailyReturns() from "quantmod"
+wheat.r <- dailyReturn(wheat.ts)
+xts_plots(wheat.r,"Returns on Wheat Futures",25)
+xts_plots(wheat.r^2,"Squared Returns on Wheat Futures",25)
+
+corn.r <- dailyReturn(corn.ts)
+xts_plots(corn.r,"Returns on Corn Futures",25)
+xts_plots(corn.r^2,"Squared Returns on Corn Futures",25)
+
+# charts.RollingPerformance(R = wheat.r)
+
+auto.arima(wheat.r) # ARIMA(0,0,0) with zero mean
+auto.arima(corn.r) # ARIMA(0,0,0) with zero mean
+
+
+```
+
+```{r}
+
+culer = c(rgb(.85,.30,.12,.6), rgb(.12,.65,.85,.6))
+astsa::tsplot(na.approx(ts_ts(wheat.ts)), col=culer[1], lwd=2, pch=20, ylab="Price ($)", main="Wheat & Corn Futures - Ksmooth")
+lines(ksmooth(time(ts_ts(wheat.ts)), na.approx(ts_ts(wheat.ts)), "normal", bandwidth=1), lwd=2, col=culer[1]) 
+
+lines(na.approx(ts_ts(corn.ts)), col=culer[2], lwd=2, pch=20)
+lines(ksmooth(time(ts_ts(corn.ts)), na.approx(ts_ts(corn.ts)), "normal", bandwidth=1), lwd=2, col=culer[2]) 
+
+legend("topleft", col=culer, lty=1, lwd=2, pch=20, legend=c("Wheat Futures", "Corn Futures"), bg="white")
+
+```
+
+```{r}
+
+
+
+
+
+auto.arima(wheat.ts) # ARIMA(1,1,3)
+wheat_113 <- Arima(wheat.ts, order=c(1,1,3))
+summary(wheat_113)
+checkresiduals(wheat_113)
+acf2(wheat_113$residuals) 
+check_normality_residuals(wheat_113)
+
+wheat_010 <- Arima(wheat.ts, order=c(0,1,0))
+summary(wheat_010)
+checkresiduals(wheat_010)
+acf2(wheat_010$residuals) 
+
+wheat_110 <- Arima(wheat.ts, order=c(1,1,0))
+summary(wheat_110)
+checkresiduals(wheat_110)
+acf2(wheat_110$residuals) 
+
+wheat_310 <- Arima(wheat.ts, order=c(3,1,0))
+summary(wheat_310)
+checkresiduals(wheat_310)
+acf2(wheat_310$residuals) 
+
+```
+
+```{r}
+
+auto.arima(corn.ts) # ARIMA(0,1,3)
+corn_013 <- Arima(corn.ts, order=c(0,1,3))
+summary(corn_013)
+checkresiduals(corn_013)
+acf2(corn_013$residuals) 
+check_normality_residuals(corn_013)
+
+corn_010 <- Arima(corn.ts, order=c(0,1,0))
+summary(corn_010)
+checkresiduals(corn_010)
+acf2(corn_010$residuals) 
+
+corn_210 <- Arima(corn.ts, order=c(2,1,0))
+summary(corn_210)
+checkresiduals(corn_210)
+acf2(corn_210$residuals) 
+
+corn_213 <- Arima(corn.ts, order=c(2,1,3))
+summary(corn_213)
+checkresiduals(corn_213)
+acf2(corn_213$residuals) 
+
+```
+
+## 4. Garch
+
+```{r}
+
+# Returns of Wheat
+mod_specify = ugarchspec(mean.model = list(armaOrder=c(1,1)),variance.model = list(model = "sGARCH",garchOrder=c(1,1)),distribution.model='sstd')
+
+wheat.garch = ugarchfit(data = wheat.r, spec = mod_specify, out.sample = 20)
+
+wheat.garch 
+
+plot(wheat.garch, which=1)
+
+
+```
+
+```{r}
+
+
+# Function to compare GARCH models
+garch_compare <- function(data, arma_order = c(0, 0), garch_order = c(1, 1)) {
+  # Supported conditional distributions
+  cond_dists <- c("std", "snorm", "ged", "sged", "sstd", "snig", "QMLE")
+  
+  # Create a list to store fitted models
+  models <- list()
+  
+  # Fit each GARCH model with the specified conditional distributions
+  for (dist in cond_dists) {
+    model_name <- paste0("ARMA(", arma_order[1], ",", arma_order[2], ")-GARCH(", 
+                        garch_order[1], ",", garch_order[2], ") with ", dist)
+    
+    models[[model_name]] <- tryCatch(
+      garchFit(
+        formula = as.formula(paste0("~arma(", arma_order[1], ",", arma_order[2], ")+garch(", 
+                                    garch_order[1], ",", garch_order[2], ")")),
+        data = data,
+        cond.dist = dist,
+        trace = FALSE
+      ),
+      error = function(e) NULL
+    )
+  }
+  
+  # Create a summary table for AIC and BIC
+  summary_df <- data.frame(Model = character(), AIC = numeric(), BIC = numeric(),stringsAsFactors = FALSE)
+  for (i in seq_along(models)) {
+        model <- models[[i]]
+        summary_df[i, ] <- c(
+          names(models)[i],
+          round(model@fit[["ics"]][["AIC"]], 3),
+          round(model@fit[["ics"]][["BIC"]], 3)) }
+  # Output the table
+  kable(summary_df, align = 'c', col.names = c("Model", "AIC", "BIC")) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed")) %>%
+    add_header_above(c("GARCH Model Comparison" = 3)) 
+}
+
+```
+
+```{r}
+garch_compare(wheat.r, arma_order = c(1, 1), garch_order = c(1, 1))
+```
+
+ARMA(0,0)-GARCH(1,1) with sstd -5.105\
+ARMA(1,1)-GARCH(1,1) with sstd -5.106 -5.097
+
+```{r}
+
+wheat_auto = garchAuto(wheat.r, cores=8, trace=TRUE)
+summary(wheat_auto)
+
+
+
+corn_auto = garchAuto(corn.r, cores=8, trace=TRUE)
+summary(corn_auto)
+```
+
+```{r}
+garch_compare(corn.r, arma_order = c(1, 1), garch_order = c(1, 1))
+```
+
+ARMA(0,0)-GARCH(1,1) with sstd -5.484 -5.477 ARMA(0,0)-GARCH(1,1) with std -5.483 -5.478
+
+```{r}
+# Returns of Corn
+mod_specify = ugarchspec(mean.model = list(armaOrder=c(1,1)),variance.model = list(model = "sGARCH",garchOrder=c(1,1)),distribution.model='std')
+
+corn.garch = ugarchfit(data = corn.r, spec = mod_specify, out.sample = 20)
+
+corn.garch 
+
+plot(corn.garch, which=1)
+```
+
+```{r}
+mod_specify = ugarchspec(mean.model = list(armaOrder=c(1,1)),variance.model = list(model = "eGARCH",garchOrder=c(1,1)),distribution.model='std')
+
+corn.egarch = ugarchfit(data = corn.r, spec = mod_specify, out.sample = 20)
+
+corn.egarch 
+```
+
+```{r}
+spec_good <- mvspec(wheat.ts, log = "yes", main = "Spectrum of Wheat Futures (Log)", col = "coral", lwd = 2)
+
+spec_good <- mvspec(corn.ts, log = "yes", main = "Spectrum of Corn Futures (Log)", col = "blue", lwd = 2)
+```
+
+```{r}
+spec_good <- mvspec(wheat.r, log = "y", main = "Spectrum of Wheat Futures Returns (Log)", col = "coral", lwd = 2)
+
+spec_good <- mvspec(corn.r, log = "y", main = "Spectrum of Corn Futures Returns (Log)", col = "blue", lwd = 2)
+```
+
+# IV. Closing
+
+# V. Appendix & References
