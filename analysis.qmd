@@ -1,23 +1,28 @@
 ---
-title: "Time Series Analysis of Daily Wheat and Corn Futures Prices"
-author: "Anthony Le" 
-date: "Dec 5, 2024" 
-editor: visual 
-format:         
+title: "Time Series Analysis of U.S. Daily Wheat, Corn, and Soybean Futures Prices"
+author: "Anthony Le"
+date: "Dec 5, 2024"
+editor: visual
+format:
   html:
-    code-summary: "Show the code" 
-    warning : false 
+    code-fold: true
+    code-summary: "Show the code"
+    warning: false
     eval: true
-    self-contained: true 
-    toc: true 
+    self-contained: true
+    toc: true
     theme: cosmo
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
+# One-time installs (uncomment to run):
+# install.packages("remotes")
+# remotes::install_github("uyenle-gh/spec.boots")  # bootstrapped spectral density CIs, GitHub-only package
 
-library(astsa) 
+library(spec.boots)
+library(astsa)
 library(tstools)
 library(xts)
 library(mosaic)
@@ -34,6 +39,7 @@ library(lmtest)
 library(fBasics)
 library(leaps)
 
+library(TSA)
 library(urca)
 library(tidyverse)
 library(ggthemes)
@@ -54,90 +60,54 @@ library(gganimate)
 library(gapminder)
 library(gifski)
 library(zoo)
-library(fGarch) 
+library(fGarch)
 library(arfima)
-library(tsDyn) 
+library(tsDyn)
 library(lme4)
 library(tsbox)
-
 
 library(RColorBrewer)
 library(TTR)
 library(quantmod)
 library(PerformanceAnalytics)
-library(Quandl)
 library(fGarch)
 library(parallel)
 library(rugarch)
+library(rmgarch)
+library(timeDate)
 
-
-
-
+# Note: TSA::arima() is used explicitly in the ARIMAX section below because
+# it supports xreg the same way stats::arima() does; loading TSA also masks
+# stats::arima(), so every other ARIMA fit in this document uses forecast::Arima()
+# instead to avoid ambiguity.
 ```
-
-# I. Introduction
-
-# II. Methods
-
-## 1. Working Data
-
-### a. Data Acquisition & Wrangling
-
-```{r}
-
-# Data Imports & Wrangling 
-wheat <- read.csv("data/wheat_futures.csv")
-corn <- read.csv("data/corn_futures.csv")
-
-wheatvol <- read.csv("data/wheat_volume.csv")
-
-# Fill in N/A's for wheat volume
-merged_data <- merge(wheat, wheatvol, by = "Date", all.x = TRUE)
-merged_data$Vol.[is.na(merged_data$Vol.)] <- merged_data$Volume[is.na(merged_data$Vol.)]
-wheat <- merged_data[, !names(merged_data) %in% "Volume"]
-
-wheat <- wheat %>%
-  mutate(Date = as.Date(wheat$Date)) 
-
-corn <- corn %>%
-  mutate(Date = as.Date(corn$Date))
-
-total <- merge(wheat,corn,by="Date")%>% 
-  rename('Wheat' = 'Price.x',
-         'wheat_vol' = 'Vol..x',
-         'Corn' = 'Price.y',
-         'corn_vol' = 'Vol..y') %>%
-  mutate(wheat_vol = na.approx(wheat_vol))%>%
-  mutate(corn_vol = na.approx(corn_vol))%>%
-  mutate("Month" = month(Date)) %>%
-  mutate("Year" = year(Date))
-
-```
-
-### b. Potential Biases & Assumptions
-
-## 2. Time Series Analysis
-
-### a. Assumption & Validation
-
-### b. Function of Time Models
-
-### c. ARIMA, ARFIMA, SARIMA, and ARIMAX Models
-
-### d. Spectral Analysis
-
-### e. GARCH Models
-
-### f. Markov Switching AR/Threshold Models
-
-### h. Bootstraping
-
-### i. Cross Validation
-
-### j. Self-defining Functions
 
 ```{r, include=FALSE}
 # Self-Defining Functions
+#
+# Reused throughout the analysis to avoid repeating the same test/summary/plot
+# boilerplate for each of the three commodities:
+#
+# - check_stationarity(): ADF, Phillips-Perron, KPSS, and ERS tests in one table
+# - check_normality_residuals(): Anderson-Darling, Jarque-Bera, Lilliefors tests
+#     plus skewness/kurtosis, for residual diagnostics
+# - tsgplot(): a styled ggplot time series line plot
+# - four_plots() / two_plots(): ACF/PACF panels (four_plots also splits the
+#     series into first/last thirds to eyeball structural change)
+# - diff_plots(): time series + ACF/PACF composite for a differenced `ts` object
+# - xts_plots(): same composite, but for `xts` objects (used for price/return series)
+# - model_summary_table() / arima_summary_table() / sarima_summary_table():
+#     side-by-side AIC/BIC/R^2 comparison tables for lm/Arima objects
+# - garch_table(): AIC/BIC comparison table for fGarch model objects
+# - ts_summary_table(): start/end/min/max/mean/median summary per series
+# - stationarity_summary(): the check_stationarity() battery applied across
+#     every column of a data frame at once
+# - calculate_r2(): out-of-sample R^2 between a predicted and an actual vector
+# - garchAutoTryFit() / garchAuto(): grid search over ARMA+GARCH orders and
+#     conditional error distributions, selecting by AIC (adapted from the
+#     widely-circulated "rgarch" grid-search recipe by Ellis, 2010)
+# - garch_compare(): AIC/BIC comparison of one ARMA+GARCH order across seven
+#     candidate conditional error distributions
 
     # Stationarity Tests
     check_stationarity <- function(data) {
@@ -177,9 +147,6 @@ total <- merge(wheat,corn,by="Date")%>%
       scale_y_continuous(labels = scales::label_number(scale_cut = cut_short_scale()))
     }
 
-
-
-
     # ACF/PACF/First-Last Third Plotting
     four_plots <- function(data) {
       n <- length(data)
@@ -193,11 +160,10 @@ total <- merge(wheat,corn,by="Date")%>%
       par(mfrow = c(1, 1))
     }
 
-
     # ACF/PACF Plotting
     two_plots <- function(data, lag =50) {
-      par(mfrow = c(2, 1))
-      acf(data, lag.max =lag)
+      par(mfrow = c(1, 2))
+      plot(acf(data, plot=FALSE, lag.max = lag)[1:lag])
       pacf(data, lag.max =lag)
       par(mfrow = c(1, 1))
     }
@@ -216,12 +182,10 @@ total <- merge(wheat,corn,by="Date")%>%
       layout(matrix(c(1,1,2,3), 2, 2, byrow = TRUE))
       astsa::tsplot(ts_ts(data), main= name)
       abline(h = mean(ts_ts(data), na.rm = TRUE), col = "red", lty = 2)
-      acf(data, lag.max =lag)
+      plot(acf(data, plot=FALSE, lag.max = lag)[1:lag])
       pacf(data, lag.max =lag)
       par(mfrow = c(1,1))
     }
-
-
 
     # Model Summary
     model_summary_table <- function(models_list) {
@@ -246,7 +210,6 @@ total <- merge(wheat,corn,by="Date")%>%
         add_header_above(c("Model Summary" = 4))
     }
 
-
     # GARCH Model Summary
     garch_table <- function(models_list) {
       model_names <- names(models_list)
@@ -266,7 +229,6 @@ total <- merge(wheat,corn,by="Date")%>%
         kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condensed")) %>%
         add_header_above(c("GARCH Summary" = 3))
     }
-
 
     # SARIMA Model Summary
     sarima_summary_table <- function(models_list) {
@@ -289,11 +251,30 @@ total <- merge(wheat,corn,by="Date")%>%
         add_header_above(c("Model Summary" = 3))
     }
 
-
+    # ARIMA Model Summary
+    arima_summary_table <- function(models_list) {
+      model_names <- names(models_list)
+      if (is.null(model_names)) {
+        model_names <- paste("Model", seq_along(models_list)) }
+      summary_df <- data.frame(Model = character(),
+                               AIC = numeric(),
+                               BIC = numeric(),
+                               stringsAsFactors = FALSE)
+      for (i in seq_along(models_list)) {
+        model <- models_list[[i]]
+        model_summary <- summary(model)
+        summary_df[i, ] <- c(
+          model_names[i],
+          round(model[["aic"]], 2),
+          round(model[["bic"]], 2)) }
+      kable(summary_df, align = 'c', col.names = c("Model",  "AIC", "BIC")) %>%
+        kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condensed")) %>%
+        add_header_above(c("Model Summary" = 3))
+    }
 
     # Normality Tests Function
     check_normality_residuals <- function(model) {
-      residuals <- residuals(model) 
+      residuals <- residuals(model)
       ad_result <- ad.test(residuals)
       jb_result <- jarque.bera.test(residuals)
       lillie_result <- lillie.test(residuals)
@@ -326,11 +307,11 @@ total <- merge(wheat,corn,by="Date")%>%
 
   # Time Series Summary Table
 ts_summary_table <- function(ts_list) {
-  
+
   ts_names <- names(ts_list)
   if (is.null(ts_names)) {
     ts_names <- paste("Series", seq_along(ts_list))  }
-  
+
   summary_df <- data.frame(Series = character(),
                            Start = character(),
                            End = character(),
@@ -353,18 +334,17 @@ ts_summary_table <- function(ts_list) {
     )
   }
 
-  kable(summary_df, align = 'c', 
+  kable(summary_df, align = 'c',
         col.names = c("Series", "Start", "End", "Min", "Max", "Mean", "Median")) %>%
     kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condensed")) %>%
     add_header_above(c("Time Series Summary" = 7))
 }
 
-
 calculate_r2 <- function(predicted_values, actual_values) {
   ss_residual <- sum((actual_values - predicted_values)^2)
   ss_total <- sum((actual_values - mean(actual_values))^2)
   r_squared <- 1 - (ss_residual / ss_total)
-  
+
   cat("R-squared of the model is:", round(r_squared, 4), "\n")}
 
 ts_plots <- function(data, title = "Time Series Plots") {
@@ -374,7 +354,6 @@ ts_plots <- function(data, title = "Time Series Plots") {
   }
   title(main = title, outer = TRUE)
 }
-
 
 stationarity_summary <- function(data) {
   summary_table <- data.frame(
@@ -549,92 +528,266 @@ garchAuto = function(
 
    return( NULL )
 }
+
+# Function to compare GARCH models
+garch_compare <- function(data, arma_order = c(0, 0), garch_order = c(1, 1)) {
+  cond_dists <- c("std", "snorm", "ged", "sged", "sstd", "snig", "QMLE")
+
+  models <- list()
+
+  for (dist in cond_dists) {
+    model_name <- paste0("ARMA(", arma_order[1], ",", arma_order[2], ")-GARCH(",
+                        garch_order[1], ",", garch_order[2], ") with ", dist)
+
+    models[[model_name]] <- tryCatch(
+      garchFit(formula = as.formula(paste0("~arma(", arma_order[1], ",", arma_order[2], ")+garch(", garch_order[1], ",", garch_order[2], ")")),
+        data = data, cond.dist = dist, trace = FALSE), error = function(e) NULL)
+  }
+
+  summary_df <- data.frame(Model = character(),
+                           AIC = numeric(),
+                           BIC = numeric(),
+                           stringsAsFactors = FALSE)
+  for (i in seq_along(models)) {
+        model <- models[[i]]
+        summary_df[i, ] <- c(
+          names(models)[i],
+          round(model@fit[["ics"]][["AIC"]], 3),
+          round(model@fit[["ics"]][["BIC"]], 3)) }
+
+  # Output the table
+  kable(summary_df, align = 'c', col.names = c("Model", "AIC", "BIC")) %>%
+    kable_styling(full_width = FALSE,
+                  bootstrap_options = c("striped", "hover", "condensed")) %>%
+    add_header_above(c("GARCH Model Comparison" = 3))
+}
+
 ```
 
-# III. Results & Conclusions
+# I. Introduction
 
-## 1. Descriptive Analysis
+The agricultural commodities market is integral to global trade and economic stability, providing food, feed, and raw materials for a diverse range of industries. However, prices in this sector are highly volatile due to weather-dependent production, geopolitical events, and macroeconomic fluctuations. Futures markets for commodities like wheat, corn, and soybeans provide a vital platform for buyers and sellers to trade standardized contracts for future delivery, primarily facilitating investment opportunities for speculators and hedgers against price volatility.
+
+This document is the full companion code notebook to the written report (`report/paper.pdf`): it walks through data acquisition and wrangling, descriptive and spectral analysis, and the full modeling pipeline — function-of-time/ARIMA models, univariate GARCH, multivariate (DCC) GARCH, and ARIMAX models — for daily wheat, corn, and soybean futures prices from January 2000 through early December 2024. Each commodity's futures contract represents 5,000 bushels, with prices quoted in U.S. cents per bushel in the raw data (converted to dollars below).
+
+# II. Data Import & Initial Exploration
+
+The code below imports the data for three commodity series with information on prices and volumes of trades since Jan 3, 2000 to Dec 5, 2024. Initial wrangling includes replacing N/A's values in volumes of each futures with linear approximation.
 
 ```{r}
 
-culer = c(rgb(.85,.30,.12,.6), rgb(.12,.65,.85,.6))
-# Plot the time series 
+# Data Imports
+wheat <- read.csv("data/wheat_futures.csv")
+corn <- read.csv("data/corn_futures.csv")
+soy <- read.csv("data/soybean_futures.csv")
+
+wheatvol <- read.csv("data/wheat_volume.csv")
+soyvol <- read.csv("data/soybean_volume.csv")
+
+# Fill in N/A's for wheat and soy volume
+merged_data <- merge(wheat, wheatvol, by = "Date", all.x = TRUE)
+merged_data$Vol.[is.na(merged_data$Vol.)] <- merged_data$Volume[is.na(merged_data$Vol.)]
+wheat <- merged_data[, !names(merged_data) %in% "Volume"]
+
+merged_data <- merge(soy, soyvol, by = "Date", all.x = TRUE)
+merged_data$Vol.[is.na(merged_data$Vol.)] <- merged_data$Volume[is.na(merged_data$Vol.)]
+soy <- merged_data[, !names(merged_data) %in% "Volume"]
+
+
+# Wrangling
+wheat <- wheat %>%
+  mutate(Date = as.Date(wheat$Date))
+
+corn <- corn %>%
+  mutate(Date = as.Date(corn$Date))
+
+soy <- soy %>%
+  mutate(Date = as.Date(soy$Date))
+
+
+total <- merge(wheat,corn,by="Date")%>%
+  rename('Wheat' = 'Price.x',
+         'wheat_vol' = 'Vol..x',
+         'Corn' = 'Price.y',
+         'corn_vol' = 'Vol..y')
+
+total <- merge(total,soy,by="Date")%>%
+  rename('Soy' = 'Price',
+         'soy_vol' = 'Vol.') %>%
+  mutate(wheat_vol = na.approx(wheat_vol))%>%
+  mutate(corn_vol = na.approx(corn_vol))%>%
+  mutate(soy_vol = na.approx(soy_vol))%>%
+  mutate("Month" = month(Date)) %>%
+  mutate("Year" = year(Date)) %>%
+  mutate(Wheat = Wheat/100)%>%
+  mutate(Corn = Corn/100)%>%
+  mutate(Soy = Soy/100)
+
+
+```
+
+## Potential Biases & Assumptions
+
+The data is sourced from the Chicago Board of Trade (CBOT), one of several exchanges (alongside Euronext, KCBT, and MGEX) where these commodities trade, so it represents a sample rather than the full population of futures activity and may not capture dynamics specific to other exchanges. Trading volume figures are also prone to reporting gaps — handled here via linear interpolation — which should be kept in mind when interpreting volume-based results.
+
+The price and volume are plotted below.
+
+```{r}
+
+
+# Plot the time series
 price_plot <- ggplot(total, aes(x = Date)) +
   geom_line(aes(y = Wheat, color = "Wheat")) +
-  geom_line(aes(y = Corn, color = "Corn")) +
-  labs(title = "Time Series of Wheat and Corn Futures Prices",
+  geom_line(aes(y = Corn, color = "Corn"))+
+  geom_line(aes(y = Soy, color = "Soybeans")) +
+  labs(title = "Wheat, Corn, and Soybeans Futures Prices",
        y = "Price ($)",
        x = "Year") +
-  scale_color_manual(values = c("Wheat" = "coral", "Corn"= "cornflowerblue")) +
+  scale_color_manual(values = c("Wheat" = "coral", "Corn"= "cornflowerblue","Soybeans"="brown1")) +
   theme_light()
 
 volume_plot <- ggplot(total, aes(x = Date)) +
-  geom_line(aes(y = wheat_vol, color = "Wheat Volume"), linewidth = .5) +
-  geom_line(aes(y = corn_vol, color = "Corn Volume"), linewidth = .25) +
-  labs(title = "Time Series of Wheat and Corn Futures Volumes",
+  geom_line(aes(y = wheat_vol, color = "Wheat"), linewidth = .15) +
+  geom_line(aes(y = corn_vol, color = "Corn"), linewidth = .15) +
+  geom_line(aes(y = soy_vol, color = "Soybeans"), linewidth = .15) +
+  labs(title = "Wheat, Corn, and Soybeans Futures Volumes",
        y = "Volume",
        x = "Year") +
-  scale_color_manual(values = c("Wheat Volume" = "coral", "Corn Volume"= "cornflowerblue"))+
+  scale_color_manual(values = c("Wheat" = "coral", "Corn"= "cornflowerblue","Soybeans"="brown1")) +
   scale_y_continuous(labels = scales::label_number(scale_cut = cut_short_scale())) +
   theme_light()
 
 price_plot / volume_plot
 ```
 
+As seen below, there does not seem to be any monthly seasonality in the prices of these derivatives.
+
 ```{r}
 
 
-p <- ggplot(total, aes(x=Month, color = Year)) + 
-  geom_line(aes(y = Wheat), linetype = 3, alpha = 0.7, label =" ") +
-  geom_line(aes(y = Corn), linetype = 4, alpha = 0.7) +
+p <- ggplot(total, aes(x=Month, alpha = Year)) +
+  geom_line(aes(y = Wheat, color = "Wheat")) +
+  geom_line(aes(y = Corn, color = "Corn"))+
+  geom_line(aes(y = Soy, color = "Soybeans"))+
   labs(x = "Month",
        y = "Price ($)",
-       title = "Wheat and Corn Futures Prices by Month") +
-  theme_minimal() + 
+       title = "Wheat, Corn, and Soybeans Futures Prices by Month") +
+  theme_minimal() +
+  scale_color_manual(values = c("Wheat" = "coral", "Corn"= "cornflowerblue", "Soybeans" = "brown1"))+
   scale_x_continuous(breaks=c(2,4, 6, 8,10,12)) +
-  transition_states(Year) 
+  transition_states(Year)
 
 animate(p, renderer = gifski_renderer())
 ```
 
-## 2. Exploration
-
-```{r}
-
-# "time series has no or less than 2 periods"
-
-# plot(decompose(wheat.ts))
-# plot(stl(wheat.ts))
-
-
-```
+Now we create time series objects for each commodity's futures prices and plot them along with corresponding ACF/PACF plots. The most recent 47 trading days (Oct 1 – Dec 5, 2024) are held out as a test set for cross-validation later on.
 
 ```{r}
 # Separating Training & Testing data
-testdata <- tail(total, 30)
-total <- head(total,6293)
-
+testdata <- tail(total, 47)
+total <- head(total,as.numeric(count(total)-47))
 
 # Constructing xts objects
 total.ts <- xts(total, order.by = total$Date)
 wheat.ts <- xts(total$Wheat, total$Date)
 corn.ts <- xts(total$Corn, total$Date)
+soy.ts <- xts(total$Soy, total$Date)
 
 
-# Original Data 
-xts_plots(wheat.ts,"Wheat Futures",20)
-xts_plots(corn.ts,"Corn Futures",20)
+# Original Data
+xts_plots(wheat.ts,"Wheat Futures")
+xts_plots(corn.ts,"Corn Futures")
+xts_plots(soy.ts,"Soybeans Futures")
+```
 
-# Differenced Plots
-xts_plots(diff(wheat.ts)[-1],"Differenced Wheat Futures",20)
+After plotting the original data, we plot the differenced time series of these derivatives as well.
+
+```{r}
+
+# Differenced Data
+xts_plots(diff(wheat.ts)[-1],"Differenced Wheat Futures")
 xts_plots(diff(corn.ts)[-1],"Differenced Corn Futures")
+xts_plots(diff(soy.ts)[-1],"Differenced Soy Futures")
+
+```
+
+When trying to decompose the series, it appears that there is no seasonality that the computer can recognize in either the original or differenced series — `decompose()`/`stl()` error out with "time series has no or fewer than 2 periods", which is expected for a derivatives market rather than a raw seasonal commodity series, so those calls are left commented out below.
+
+```{r}
+
+# "time series has no or less than 2 periods"
+
+# plot(stl(wheat.ts))
+# plot(stl(corn.ts))
+# plot(stl(soy.ts))
+# plot(stl(wheat.r))
+# plot(stl(corn.r))
+# plot(stl(soy.r))
+
+```
+
+Applying Ksmooth, we can try to pick up some overall trend in the data instead.
+
+```{r}
+
+col.set = c("coral","cornflowerblue","brown1")
+
+plot(na.approx(ts_ts(wheat.ts)), col=col.set[1], lwd=.75, pch=20, ylab="Price ($)", main="Wheat, Corn, and Soybeans Futures - Ksmooth (bandwidth =1)", ylim = c(1.5,18))
+lines(ksmooth(time(ts_ts(wheat.ts)), na.approx(ts_ts(wheat.ts)), "normal", bandwidth=1), lwd=2, col=col.set[1])
+
+lines(na.approx(ts_ts(corn.ts)), col=col.set[2], lwd=.75,pch=20)
+lines(ksmooth(time(ts_ts(corn.ts)), na.approx(ts_ts(corn.ts)), "normal", bandwidth=1), lwd=2, col=col.set[2])
+
+lines(na.approx(ts_ts(soy.ts)), col=col.set[3], lwd=.75, pch=20)
+lines(ksmooth(time(ts_ts(soy.ts)), na.approx(ts_ts(soy.ts)), "normal", bandwidth=1), lwd=2, col=col.set[3])
+
+legend("topleft", col=col.set, lty=1, lwd=2, pch=20, legend=c("Wheat", "Corn","Soybeans"), bg="white", bty = "n")
 
 
-# Daily returns 
-# One way to calculate the returns is to use diff(log(data)), which is commented below. 
+
+
+plot(na.approx(ts_ts(wheat.ts)), col=col.set[1], lwd=.75, pch=20, ylab="Price ($)", main="Wheat, Corn, and Soybeans Futures - Ksmooth (bandwidth =0.5)", ylim = c(1.5,18))
+lines(ksmooth(time(ts_ts(wheat.ts)), na.approx(ts_ts(wheat.ts)), "normal", bandwidth=0.5), lwd=2, col=col.set[1])
+
+lines(na.approx(ts_ts(corn.ts)), col=col.set[2], lwd=.75,pch=20)
+lines(ksmooth(time(ts_ts(corn.ts)), na.approx(ts_ts(corn.ts)), "normal", bandwidth=0.5), lwd=2, col=col.set[2])
+
+lines(na.approx(ts_ts(soy.ts)), col=col.set[3], lwd=.75, pch=20)
+lines(ksmooth(time(ts_ts(soy.ts)), na.approx(ts_ts(soy.ts)), "normal", bandwidth=0.5), lwd=2, col=col.set[3])
+
+legend("topleft", col=col.set, lty=1, lwd=2, pch=20, legend=c("Wheat", "Corn","Soybeans"), bg="white", bty = "n")
+
+```
+
+# III. Spectral Analysis
+
+In this section, we explore the spectrums of each series (differenced for stationarity) and their corresponding daily returns as well.
+
+```{r}
+par(mfrow=c(3,1))
+mvspec(diff(wheat.ts)[-1], log = "y", main = "Spectrum of Differenced Wheat Futures (Log)", col = col.set[1], lwd = 2)
+mvspec(diff(corn.ts)[-1], log = "y", main = "Spectrum of Differenced Corn Futures (Log)", col = col.set[2], lwd = 2)
+mvspec(diff(soy.ts)[-1], log = "y", main = "Spectrum of Differenced Soybeans Futures (Log)", col = col.set[3], lwd = 2)
+```
+
+Bootstrapping the spectral density tells us that there are no significant frequencies.
+
+```{r}
+par(mfrow=c(3,1))
+spec1 <- spec.boots(diff(na.approx(ts_ts(wheat.ts))), 1000,kernel("daniell", c(2,2)) )
+spec2 <- spec.boots(diff(na.approx(ts_ts(corn.ts))), 1000,kernel("daniell", c(2,2)) )
+spec3 <- spec.boots(diff(na.approx(ts_ts(soy.ts))), 1000,kernel("daniell", c(2,2)) )
+```
+
+Daily returns data is produced using the `dailyReturn` function in `quantmod`. Each series is stationary, independent, and random. Notably, `auto.arima()` suggests ARIMA(0,0,0) with zero mean for all of them — i.e., no exploitable structure in the mean of daily returns, which is exactly what motivates modeling their variance with GARCH below.
+
+```{r}
+# Daily returns
+
+# One way to calculate the returns is to use diff(log(data)), which is commented below.
 # xts_plots(diff(log(wheat.ts))[-1],"Returns on Wheat Futures",25)
 
-# However, for the context of financial data, we can also use dailyReturns() from "quantmod"
+# However, for simplicity, we can also use dailyReturns() from "quantmod".
 wheat.r <- dailyReturn(wheat.ts)
 xts_plots(wheat.r,"Returns on Wheat Futures",25)
 xts_plots(wheat.r^2,"Squared Returns on Wheat Futures",25)
@@ -643,198 +796,409 @@ corn.r <- dailyReturn(corn.ts)
 xts_plots(corn.r,"Returns on Corn Futures",25)
 xts_plots(corn.r^2,"Squared Returns on Corn Futures",25)
 
+soy.r <- dailyReturn(soy.ts)
+xts_plots(soy.r,"Returns on Soybeans Futures",25)
+xts_plots(soy.r^2,"Squared Returns on Soybeans Futures",25)
+
+
 # charts.RollingPerformance(R = wheat.r)
 
-auto.arima(wheat.r) # ARIMA(0,0,0) with zero mean
-auto.arima(corn.r) # ARIMA(0,0,0) with zero mean
-
-
-```
-
-```{r}
-
-culer = c(rgb(.85,.30,.12,.6), rgb(.12,.65,.85,.6))
-astsa::tsplot(na.approx(ts_ts(wheat.ts)), col=culer[1], lwd=2, pch=20, ylab="Price ($)", main="Wheat & Corn Futures - Ksmooth")
-lines(ksmooth(time(ts_ts(wheat.ts)), na.approx(ts_ts(wheat.ts)), "normal", bandwidth=1), lwd=2, col=culer[1]) 
-
-lines(na.approx(ts_ts(corn.ts)), col=culer[2], lwd=2, pch=20)
-lines(ksmooth(time(ts_ts(corn.ts)), na.approx(ts_ts(corn.ts)), "normal", bandwidth=1), lwd=2, col=culer[2]) 
-
-legend("topleft", col=culer, lty=1, lwd=2, pch=20, legend=c("Wheat Futures", "Corn Futures"), bg="white")
+summary(auto.arima(wheat.r) )# ARIMA(0,0,0) with zero mean
+summary(auto.arima(corn.r) )# ARIMA(0,0,0) with zero mean
+summary(auto.arima(soy.r)) # ARIMA(0,0,0) with zero mean
 
 ```
 
 ```{r}
+par(mfrow=c(3,1))
+wheat.r.spec <- mvspec(wheat.r, log = "y", main = "Spectrum of Returns on Wheat Futures (Log)", col = col.set[1], lwd = 1)
+corn.r.spec <- mvspec(corn.r, log = "y", main = "Spectrum of Returns on Corn Futures (Log)", col = col.set[2], lwd = 1)
+soy.r.spec <- mvspec(soy.r, log = "y", main = "Spectrum of Returns Soybeans Futures (Log)", col = col.set[3], lwd = 1)
+```
+
+# IV. ARIMA Models
+
+## Wheat Futures
+
+By manually fitting ARIMA models guided by ACF/PACF signals and using `auto.arima()`, we were not able to find a model with reasonably independent and normal residuals. The "best" model by AIC is ARIMA(1,1,3), suggested by `auto.arima()`.
+
+```{r}
 
 
+wheat_auto <- auto.arima(wheat.ts) # ARIMA(1,1,3)
+summary(wheat_auto) # AIC=-7404.54 - best
+checkresiduals(wheat_auto)
+acf(wheat_auto$residuals, lag.max = 100)
+pacf(wheat_auto$residuals, lag.max = 100)
+check_stationarity(wheat_auto$residuals)
+check_normality_residuals(wheat_auto)
 
-
-
-auto.arima(wheat.ts) # ARIMA(1,1,3)
-wheat_113 <- Arima(wheat.ts, order=c(1,1,3))
-summary(wheat_113)
-checkresiduals(wheat_113)
-acf2(wheat_113$residuals) 
-check_normality_residuals(wheat_113)
+wheat_100 <- Arima(wheat.ts, order=c(1,0,0))
+summary(wheat_100) #AIC=49867.95
+checkresiduals(wheat_100)
 
 wheat_010 <- Arima(wheat.ts, order=c(0,1,0))
-summary(wheat_010)
+summary(wheat_010) #AIC=49858.42
 checkresiduals(wheat_010)
-acf2(wheat_010$residuals) 
 
 wheat_110 <- Arima(wheat.ts, order=c(1,1,0))
-summary(wheat_110)
+summary(wheat_110) #AIC=49847.93
 checkresiduals(wheat_110)
-acf2(wheat_110$residuals) 
 
 wheat_310 <- Arima(wheat.ts, order=c(3,1,0))
-summary(wheat_310)
+summary(wheat_310) #AIC=49834.12
 checkresiduals(wheat_310)
-acf2(wheat_310$residuals) 
+
+wheat.arima <- list("auto.arima() - ARIMA(1,1,3)"= wheat_auto,
+                         "ARIMA(1,0,0)" = wheat_100,
+                         "ARIMA(0,1,0)" = wheat_010,
+                         "ARIMA(1,1,0)" = wheat_110,
+                         "ARIMA(3,1,0)" = wheat_310)
+arima_summary_table(wheat.arima)
 
 ```
+
+## Corn Futures
+
+The same thing happens for corn futures — we can't find a model with desirable residuals, and the best-fit model is again the one suggested by `auto.arima()`: ARIMA(0,1,3).
 
 ```{r}
 
-auto.arima(corn.ts) # ARIMA(0,1,3)
-corn_013 <- Arima(corn.ts, order=c(0,1,3))
-summary(corn_013)
-checkresiduals(corn_013)
-acf2(corn_013$residuals) 
-check_normality_residuals(corn_013)
+corn_auto <- auto.arima(corn.ts) # ARIMA(0,1,3)
+summary(corn_auto) # AIC=44553.38 - Best
+checkresiduals(corn_auto)
+acf(corn_auto$residuals, lag.max = 100)
+pacf(corn_auto$residuals, lag.max = 100)
+check_stationarity(corn_auto$residuals)
+check_normality_residuals(corn_auto)
 
 corn_010 <- Arima(corn.ts, order=c(0,1,0))
-summary(corn_010)
+summary(corn_010) # AIC=44563.78
 checkresiduals(corn_010)
-acf2(corn_010$residuals) 
 
 corn_210 <- Arima(corn.ts, order=c(2,1,0))
-summary(corn_210)
+summary(corn_210) #AIC=44558.27
 checkresiduals(corn_210)
-acf2(corn_210$residuals) 
 
 corn_213 <- Arima(corn.ts, order=c(2,1,3))
-summary(corn_213)
+summary(corn_213) #AIC=44554.64
 checkresiduals(corn_213)
-acf2(corn_213$residuals) 
+
+corn.arima <- list("auto.arima() - ARIMA(0,1,3)"= corn_auto,
+                         "ARIMA(0,1,0)" = corn_010,
+                         "ARIMA(2,1,0)" = corn_210,
+                         "ARIMA(2,1,3)" = corn_213)
+
+arima_summary_table(corn.arima)
 
 ```
 
-## 4. Garch
+## Soybean Futures
+
+For soybean futures, `auto.arima()` suggests ARIMA(0,1,0) — effectively a random walk — and we cannot find any better fit.
+
+```{r}
+soy_auto <- auto.arima(soy.ts) # ARIMA(0,1,0)
+summary(soy_auto) # AIC=44553.38 - Best
+checkresiduals(soy_auto)
+acf(soy_auto$residuals, lag.max = 100)
+pacf(soy_auto$residuals, lag.max = 100)
+check_stationarity(soy_auto$residuals)
+check_normality_residuals(soy_auto)
+
+soy_110 <- Arima(soy.ts, order=c(0,1,1))
+summary(soy_110) #AIC=44554.64
+checkresiduals(soy_110)
+
+
+```
+
+# V. GARCH Models
+
+## Wheat Futures
+
+We fit ARMA(0,0)+GARCH(1,1) and ARMA(1,1)+GARCH(1,1). Running `garch_compare()` to search over conditional error distributions points to a skewed Student-t ("sstd"). This differs from the ARMA(1,3)+GARCH(1,1) suggested by `garchAuto()`'s own AIC-based search, but the simpler ARMA(0,0)+GARCH(1,1) specification is preferred here since it aligns with the returns analysis above (`auto.arima()` suggesting ARIMA(0,0,0) for the mean).
 
 ```{r}
 
 # Returns of Wheat
+
+wheat.garch_auto = garchAuto(wheat.r, cores=8, trace=TRUE)
+summary(wheat.garch_auto)
+
+
+mod_specify = ugarchspec(mean.model = list(armaOrder=c(0,0)),variance.model = list(model = "sGARCH",garchOrder=c(1,1)),distribution.model='sstd')
+
+wheat.garch1 = ugarchfit(data = wheat.r, spec = mod_specify, out.sample = 20)
+wheat.garch1
+checkresiduals(wheat.garch1@fit)
+acf2(wheat.garch1@fit$residuals^2)
+plot(wheat.garch1, which=1)
+
+
+
 mod_specify = ugarchspec(mean.model = list(armaOrder=c(1,1)),variance.model = list(model = "sGARCH",garchOrder=c(1,1)),distribution.model='sstd')
 
-wheat.garch = ugarchfit(data = wheat.r, spec = mod_specify, out.sample = 20)
-
-wheat.garch 
-
-plot(wheat.garch, which=1)
-
+wheat.garch2 = ugarchfit(data = wheat.r, spec = mod_specify, out.sample = 20)
+wheat.garch2
+garch_compare(wheat.r, arma_order = c(0, 0), garch_order = c(1, 1))
 
 ```
+
+Residuals are largely independent and normal.
 
 ```{r}
-
-
-# Function to compare GARCH models
-garch_compare <- function(data, arma_order = c(0, 0), garch_order = c(1, 1)) {
-  # Supported conditional distributions
-  cond_dists <- c("std", "snorm", "ged", "sged", "sstd", "snig", "QMLE")
-  
-  # Create a list to store fitted models
-  models <- list()
-  
-  # Fit each GARCH model with the specified conditional distributions
-  for (dist in cond_dists) {
-    model_name <- paste0("ARMA(", arma_order[1], ",", arma_order[2], ")-GARCH(", 
-                        garch_order[1], ",", garch_order[2], ") with ", dist)
-    
-    models[[model_name]] <- tryCatch(
-      garchFit(
-        formula = as.formula(paste0("~arma(", arma_order[1], ",", arma_order[2], ")+garch(", 
-                                    garch_order[1], ",", garch_order[2], ")")),
-        data = data,
-        cond.dist = dist,
-        trace = FALSE
-      ),
-      error = function(e) NULL
-    )
-  }
-  
-  # Create a summary table for AIC and BIC
-  summary_df <- data.frame(Model = character(), AIC = numeric(), BIC = numeric(),stringsAsFactors = FALSE)
-  for (i in seq_along(models)) {
-        model <- models[[i]]
-        summary_df[i, ] <- c(
-          names(models)[i],
-          round(model@fit[["ics"]][["AIC"]], 3),
-          round(model@fit[["ics"]][["BIC"]], 3)) }
-  # Output the table
-  kable(summary_df, align = 'c', col.names = c("Model", "AIC", "BIC")) %>%
-    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed")) %>%
-    add_header_above(c("GARCH Model Comparison" = 3)) 
-}
-
+checkresiduals(wheat.garch1@fit)
+acf(wheat.garch1@fit$residuals, lag.max=100)
+pacf(wheat.garch1@fit$residuals, lag.max=100)
 ```
+
+This plot shows the relationship between the squared residuals and the model's fitted conditional variance — the two tracking each other is a sanity check that the GARCH variance equation is picking up the volatility clustering visible in the data.
 
 ```{r}
-garch_compare(wheat.r, arma_order = c(1, 1), garch_order = c(1, 1))
+plot((wheat.garch1@fit$residuals)^2, type = "l",ylab="Squared Residuals")
+lines(wheat.garch1@fit$var , col = "green")
 ```
 
-ARMA(0,0)-GARCH(1,1) with sstd -5.105\
-ARMA(1,1)-GARCH(1,1) with sstd -5.106 -5.097
+## Corn and Soybean Futures
 
-```{r}
-
-wheat_auto = garchAuto(wheat.r, cores=8, trace=TRUE)
-summary(wheat_auto)
-
-
-
-corn_auto = garchAuto(corn.r, cores=8, trace=TRUE)
-summary(corn_auto)
-```
-
-```{r}
-garch_compare(corn.r, arma_order = c(1, 1), garch_order = c(1, 1))
-```
-
-ARMA(0,0)-GARCH(1,1) with sstd -5.484 -5.477 ARMA(0,0)-GARCH(1,1) with std -5.483 -5.478
+We repeat the same process for returns on corn and soybean futures. The best model for each series is again ARMA(0,0)+GARCH(1,1).
 
 ```{r}
 # Returns of Corn
+
+corn_auto = garchAuto(corn.r, cores=8, trace=TRUE)
+summary(corn_auto)
+
+garch_compare(corn.r, arma_order = c(1, 1), garch_order = c(1, 1))
+garch_compare(corn.r, arma_order = c(0, 0), garch_order = c(1, 1))
+
+mod_specify = ugarchspec(mean.model = list(armaOrder=c(0,0)),variance.model = list(model = "sGARCH",garchOrder=c(1,1)),distribution.model='std')
+
+corn.garch1 = ugarchfit(data = corn.r, spec = mod_specify, out.sample = 20)
+corn.garch1
+
+
 mod_specify = ugarchspec(mean.model = list(armaOrder=c(1,1)),variance.model = list(model = "sGARCH",garchOrder=c(1,1)),distribution.model='std')
 
-corn.garch = ugarchfit(data = corn.r, spec = mod_specify, out.sample = 20)
+corn.garch2 = ugarchfit(data = corn.r, spec = mod_specify, out.sample = 20)
+corn.garch2
 
-corn.garch 
+plot(corn.garch2, which=1)
 
-plot(corn.garch, which=1)
-```
 
-```{r}
-mod_specify = ugarchspec(mean.model = list(armaOrder=c(1,1)),variance.model = list(model = "eGARCH",garchOrder=c(1,1)),distribution.model='std')
+
+mod_specify = ugarchspec(mean.model = list(armaOrder=c(1,1)),variance.model = list(model = "eGARCH",garchOrder=c(0,1)),distribution.model='std')
 
 corn.egarch = ugarchfit(data = corn.r, spec = mod_specify, out.sample = 20)
+corn.egarch
 
-corn.egarch 
 ```
 
 ```{r}
-spec_good <- mvspec(wheat.ts, log = "yes", main = "Spectrum of Wheat Futures (Log)", col = "coral", lwd = 2)
+checkresiduals(corn.garch1@fit)
+acf(corn.garch1@fit$residuals, lag.max=100)
+pacf(corn.garch1@fit$residuals, lag.max=100)
 
-spec_good <- mvspec(corn.ts, log = "yes", main = "Spectrum of Corn Futures (Log)", col = "blue", lwd = 2)
+
 ```
 
 ```{r}
-spec_good <- mvspec(wheat.r, log = "y", main = "Spectrum of Wheat Futures Returns (Log)", col = "coral", lwd = 2)
 
-spec_good <- mvspec(corn.r, log = "y", main = "Spectrum of Corn Futures Returns (Log)", col = "blue", lwd = 2)
+soy.garch_auto = garchAuto(soy.r, cores=8, trace=TRUE)
+summary(soy.garch_auto)
+
+
+mod_specify = ugarchspec(mean.model = list(armaOrder=c(0,0)),variance.model = list(model = "sGARCH",garchOrder=c(1,1)),distribution.model='std')
+
+soy.garch1 = ugarchfit(data = soy.r, spec = mod_specify, out.sample = 30)
+soy.garch1
+
+checkresiduals(soy.garch1@fit)
 ```
 
-# IV. Closing
+```{r}
+checkresiduals(soy.garch1@fit)
+acf(soy.garch1@fit$residuals, lag.max=100)
+pacf(soy.garch1@fit$residuals, lag.max=100)
 
-# V. Appendix & References
+```
+
+# VI. GARCH Forecasting & Cross-Validation
+
+Using the GARCH models developed above, we forecast into the test window (Oct 1 – Dec 5, 2024) held out earlier. That window is 47 *trading* days, but `ts_ts()` below regularizes each irregular trading-day return series onto a full *calendar-day* scale (inserting NAs for weekends/holidays) — so the actual comparison series ends up 66 points long, not 47. The forecast horizon (`test_horizon`) is therefore set to the calendar-day span of the test window, not its row count, so the predicted and actual series line up one-to-one for the R² calculation below.
+
+```{r}
+test_horizon <- as.numeric(diff(range(testdata$Date))) + 1
+
+# Forecast Wheat
+wheat.for <- ugarchforecast(wheat.garch1, n.ahead = test_horizon)
+wheat.test <- ts_ts(dailyReturn(xts(testdata$Wheat,testdata$Date)))
+
+wheat.for.returns <- wheat.for@forecast$seriesFor
+wheat_r_t <- c(tail(ts_ts(wheat.r),150),rep(NA,test_horizon))
+wheat_r_f <- c(rep(NA,150),wheat.for.returns)
+wheat_r_a <- c(rep(NA,150),wheat.test)
+
+# Forecast Corn
+corn.for <- ugarchforecast(corn.garch1, n.ahead = test_horizon)
+corn.test <-  ts_ts(dailyReturn(xts(testdata$Corn,testdata$Date)))
+
+corn.for.returns <- corn.for@forecast$seriesFor
+corn_r_t <- c(tail(ts_ts(corn.r),150),rep(NA,test_horizon))
+corn_r_f <- c(rep(NA,150),corn.for.returns)
+corn_r_a <- c(rep(NA,150),corn.test)
+
+
+# Forecast Soybeans
+soy.for <- ugarchforecast(soy.garch1, n.ahead = test_horizon)
+soy.test <-  ts_ts(dailyReturn(xts(testdata$Soy,testdata$Date)))
+
+soy.for.returns <- soy.for@forecast$seriesFor
+soy_r_t <- c(tail(ts_ts(soy.r),150),rep(NA,test_horizon))
+soy_r_f <- c(rep(NA,150),soy.for.returns)
+soy_r_a <- c(rep(NA,150),soy.test)
+
+
+
+# Plotting
+par(mfrow=c(3,1))
+plot(wheat_r_t, type = "l", main = "Forecasted Wheat Futures Returns")
+lines(wheat_r_f, col = "orange")
+lines(wheat_r_a, col = "green")
+
+plot(corn_r_t, type = "l", main = "Forecasted Corn Futures Returns")
+lines(corn_r_f, col = "orange")
+lines(corn_r_a, col = "green")
+
+plot(soy_r_t, type = "l", main = "Forecasted Soybeans Futures Returns")
+lines(soy_r_f, col = "orange")
+lines(soy_r_a, col = "green")
+
+
+```
+
+Unfortunately, all three models yield negative R-Squared on this held-out window, meaning the forecasted values perform worse than simply predicting the mean return.
+
+```{r}
+# Calculate R-squared
+wheat_forecast_df <- na.omit(data.frame(
+  predicted_values = wheat_r_f,
+  actual_values = wheat_r_a))
+
+calculate_r2(
+  predicted_values = wheat_forecast_df$predicted_values,
+  actual_values = wheat_forecast_df$actual_values)
+
+corn_forecast_df <- na.omit(data.frame(
+  predicted_values = corn_r_f,
+  actual_values = corn_r_a))
+
+calculate_r2(
+  predicted_values = corn_forecast_df$predicted_values,
+  actual_values = corn_forecast_df$actual_values)
+
+soy_forecast_df <- na.omit(data.frame(
+  predicted_values = soy_r_f,
+  actual_values = soy_r_a))
+
+calculate_r2(
+  predicted_values = soy_forecast_df$predicted_values,
+  actual_values = soy_forecast_df$actual_values)
+
+```
+
+# VII. Multivariate GARCH
+
+A DCC (dynamic conditional correlation) multivariate GARCH model is fit across all three return series to estimate how the correlation between each pair of commodities evolves over time, rather than assuming it is constant.
+
+```{r}
+rX <- data.frame(wheat.r, corn.r, soy.r)
+names(rX)[1] <- "wheat.r"
+names(rX)[2] <- "corn.r"
+names(rX)[3] <- "soy.r"
+
+# DCC (MVN)
+uspec.n = multispec(replicate(3, ugarchspec(mean.model = list(armaOrder = c(0,0)))))
+multf = multifit(uspec.n, rX)
+spec1 = dccspec(uspec = uspec.n, dccOrder = c(1, 1), distribution = 'mvnorm')
+
+fit1 = dccfit(spec1, data = rX, fit.control = list(eval.se = TRUE), fit = multf)
+cov1 = rcov(fit1)  # extracts the covariance matrix
+cor1 = rcor(fit1)  # extracts the correlation matrix
+
+par(mfrow=c(3,1))
+plot(as.xts(cor1[1,2,]),main="Wheat and Corn")
+plot(as.xts(cor1[1,3,]),main="Wheat and Soybeans")
+plot(as.xts(cor1[2,3,]),main="Corn and Soybeans")
+
+
+```
+
+The forecast correlation is shown below, using the same `test_horizon` as the GARCH forecasts above for consistency.
+
+```{r}
+
+dccf1 <- dccforecast(fit1, n.ahead = test_horizon)
+Rf <- dccf1@mforecast$R
+corf_WC <- Rf[[1]][1,2,]
+corf_WS <- Rf[[1]][1,3,]
+corf_CS <- Rf[[1]][2,3,]
+
+
+
+
+par(mfrow=c(3,1))
+c_WC <- c(tail(cor1[1,2,],150),rep(NA,test_horizon))
+cf_WC <- c(rep(NA,150),corf_WC)
+plot(c_WC,type = "l",main="Correlation between Wheat and Corn Futures")
+lines(cf_WC,type = "l", col = "orange")
+
+c_WS <- c(tail(cor1[1,3,],150),rep(NA,test_horizon))
+cf_WS <- c(rep(NA,150),corf_WS)
+plot(c_WS,type = "l",main="Correlation between Wheat and Soybeans Futures")
+lines(cf_WS,type = "l", col = "orange")
+
+c_CS <- c(tail(cor1[2,3,],150),rep(NA,test_horizon))
+cf_CS <- c(rep(NA,150),corf_CS)
+plot(c_CS,type = "l",main="Correlation between Corn and Soybeans Futures")
+lines(cf_CS,type = "l", col = "orange")
+
+```
+
+# VIII. ARIMAX Models
+
+Based on the correlation analysis above, wheat is most strongly correlated with corn (and vice versa), while soybeans are also most strongly correlated with corn. Each commodity's ARIMA model is therefore extended with its most-correlated peer as an exogenous regressor (`xreg`). Note this uses `TSA::arima()` explicitly rather than `forecast::Arima()`, since `TSA::arima()` is the version that supports `xreg` the way used here.
+
+```{r}
+
+wheat.corn <-TSA::arima(wheat.ts, , order=c(1,1,3),xreg = corn.ts)
+summary(wheat.corn)
+checkresiduals(wheat.corn)
+acf2(wheat.corn$residuals)
+check_normality_residuals(wheat.corn)
+
+
+corn.wheat <-TSA::arima(corn.ts, , order=c(0,1,2),xreg = wheat.ts)
+summary(corn.wheat)
+checkresiduals(corn.wheat)
+acf2(corn.wheat$residuals)
+
+soy.corn <-TSA::arima(soy.ts, , order=c(0,1,0),xreg = corn.ts)
+summary(soy.corn)
+checkresiduals(soy.corn)
+acf2(soy.corn$residuals)
+
+```
+
+# IX. Conclusion
+
+From the analysis above, a few key findings emerge:
+
+- **No seasonality:** neither `decompose()`/`stl()`, spectral analysis, nor its bootstrapped confidence intervals turn up significant periodicity in any of the three series — consistent with futures prices tracking macroeconomic conditions rather than a fixed production calendar.
+- **ARIMA:** the best-fitting models (ARIMA(1,1,3) for wheat, ARIMA(0,1,3) for corn, ARIMA(0,1,0) — a random walk — for soybeans) all have residuals that are stationary but not independent or normal, so their forecast intervals should not be trusted.
+- **GARCH:** ARMA(0,0)+GARCH(1,1) fits all three return series well in-sample, with residuals close to independent and normal. Out-of-sample, however, all three forecasts produced negative R² against the actual Oct–Dec 2024 returns — worse than predicting the mean — so these models were not used for further forecasting.
+- **Multivariate GARCH:** the DCC model shows persistent, time-varying correlation across all three commodities, strongest between wheat and corn.
+- **ARIMAX:** adding the most-correlated peer commodity as an exogenous regressor produces statistically significant coefficients, but residuals still fail independence/normality checks, so the same forecasting caveats apply.
+
+Taken together, the value of this analysis is less about producing a deployable price forecast and more about demonstrating the discipline of the model-selection process itself — including the willingness to conclude that a model class (GARCH, here) isn't reliable enough to forecast with, rather than reporting an unvalidated result.

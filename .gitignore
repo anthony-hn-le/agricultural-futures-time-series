@@ -1,5 +1,6 @@
 .DS_Store
-*.html
+analysis.html
+analysis.rmarkdown
 *_cache/
 *_files/
 .Rproj.user/

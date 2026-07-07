@@ -29,12 +29,10 @@ MATH 422 (Time Series Analysis) final project analyzing daily CBOT futures price
 ## Repository Structure
 
 ```
-analysis.qmd     # Quarto source covering data wrangling, ARIMA, and GARCH for wheat & corn
+analysis.qmd     # Quarto source: full analysis (wheat, corn, soybeans), code and narrative
 data/            # Daily price/volume series for wheat, corn, and soybeans
-report/          # Final paper (paper.docx) and initial project proposal (proposal.docx)
+report/          # Final written paper (paper.pdf) and its rendered companion notebook (report.html)
 ```
-
-**Note:** `analysis.qmd` reflects an earlier working stage of the analysis (wheat and corn only). The full scope described above — soybeans, ARIMAX, and multivariate GARCH — was completed afterward and is documented in `report/paper.docx`, but that later code was never folded back into the `.qmd` source.
 
 ## Reproducing
 
