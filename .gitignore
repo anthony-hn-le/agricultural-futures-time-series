@@ -6,3 +6,7 @@ analysis.rmarkdown
 .Rproj.user/
 .Rhistory
 .RData
+
+# local Claude Code guidance, not for the public repo
+CLAUDE.md
+docs/agents/
